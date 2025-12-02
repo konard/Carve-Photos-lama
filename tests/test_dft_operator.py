@@ -29,16 +29,20 @@ def create_dft_test_model():
     # Input: (batch, channels, height, width) - typical image format
     X = helper.make_tensor_value_info('input', TensorProto.FLOAT, [1, 1, 8, 8])
 
-    # Output: Complex DFT result
-    Y = helper.make_tensor_value_info('output', TensorProto.FLOAT, [1, 1, 8, 5, 2])
+    # Output: Complex DFT result - onesided along axis 2 (height)
+    # For input [1, 1, 8, 8] with DFT on axis 2, output is [1, 1, 5, 8, 2]
+    # where 5 = 8//2 + 1 (onesided), and last dim is [real, imag]
+    Y = helper.make_tensor_value_info('output', TensorProto.FLOAT, [1, 1, 5, 8, 2])
 
     # DFT node - compute 1D DFT along last axis
     # Note: DFT in ONNX outputs complex as [real, imag] in last dimension
+    # axis must be between -rank and rank-2 (exclusive of -1 and rank-1)
+    # For a 4D tensor (rank=4), valid axes are: -4, -3, -2, 0, 1, 2 (not -1 or 3)
     dft_node = helper.make_node(
         'DFT',
         inputs=['input'],
         outputs=['output'],
-        axis=-1,  # Along width dimension
+        axis=2,  # Along height dimension (axis 2 of rank 4 tensor)
         inverse=0,  # Forward transform
         onesided=1,  # One-sided for real input (N//2 + 1 outputs)
     )
@@ -70,13 +74,13 @@ def create_dft_2d_test_model():
     # Input: (batch, channels, height, width)
     X = helper.make_tensor_value_info('input', TensorProto.FLOAT, [1, 4, 16, 16])
 
-    # DFT along width (last axis), onesided
+    # DFT along height (axis 2), onesided
     dft_out_1 = helper.make_tensor_value_info('dft_w', TensorProto.FLOAT, None)
     dft_node_1 = helper.make_node(
         'DFT',
         inputs=['input'],
         outputs=['dft_w'],
-        axis=-1,
+        axis=2,  # Height axis for 4D tensor
         inverse=0,
         onesided=1,
     )
