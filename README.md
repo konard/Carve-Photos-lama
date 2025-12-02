@@ -34,7 +34,170 @@ For now, LaMa (big-lama) can be exported to ONNX format / by [Carve.Photos](http
 
 🔥 ONNX Model repository on Hugging Face: [Hugging Face](https://huggingface.co/Carve/LaMa-ONNX) \
 🚀 HG Space Demo using onnx model: [Hugging Face Spaces](https://huggingface.co/spaces/Carve/LaMa-Demo-ONNX) \
-📘 Jupyter notebook to export your own model: [![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Carve-Photos/lama/blob/main/export_LaMa_to_onnx.ipynb) 
+📘 Jupyter notebook to export your own model: [![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Carve-Photos/lama/blob/main/export_LaMa_to_onnx.ipynb)
+
+## 🔧 ONNX Preprocessing & Postprocessing Guide
+
+⚠️ **Critical Information**: ONNX model preprocessing and postprocessing differs from PyTorch implementation. Following these guidelines is essential for achieving the same quality results.
+
+### 📥 Input Preprocessing
+
+The ONNX model expects inputs in the following format:
+
+1. **Image normalization**: Values must be in the range `[0, 1]` (divide by 255 if working with uint8 images)
+   ```python
+   # Convert from uint8 [0-255] to float32 [0-1]
+   image = image.astype(np.float32) / 255.0
+   ```
+
+2. **Channel format**: Images should be in CHW (Channel, Height, Width) format
+   ```python
+   # Convert from HWC to CHW
+   if image.ndim == 3:
+       image = np.transpose(image, (2, 0, 1))  # HWC -> CHW
+   ```
+
+3. **Batch dimension**: Add batch dimension (even for single images)
+   ```python
+   image = image[np.newaxis, ...]  # Add batch dimension -> (1, C, H, W)
+   ```
+
+4. **Mask format**:
+   - Single channel (grayscale)
+   - Binary values after thresholding: `(mask > 0) * 1`
+   - Same normalization as image: values in `[0, 1]`
+   - Same CHW format with batch dimension: shape `(1, 1, H, W)`
+
+5. **Image padding**: Images should be padded to be divisible by 8 (or your model's requirements)
+   ```python
+   def pad_img_to_modulo(img, mod=8):
+       channels, height, width = img.shape
+       out_height = ceil_modulo(height, mod)
+       out_width = ceil_modulo(width, mod)
+       return np.pad(img,
+                     ((0, 0), (0, out_height - height), (0, out_width - width)),
+                     mode='symmetric')
+   ```
+
+### 📤 Output Postprocessing
+
+**⚠️ CRITICAL**: The ONNX model multiplies the output by 255 internally. You must handle this correctly:
+
+```python
+# Get model output
+output = onnx_model.run(None, {'image': image, 'mask': mask})[0]
+
+# IMPORTANT: The output is already in range [0, 255]
+# DO NOT multiply by 255 again!
+
+# Convert from CHW to HWC format
+output = output[0].transpose(1, 2, 0)  # (1, C, H, W) -> (H, W, C)
+
+# Convert to uint8 (output is already scaled to [0, 255])
+output = output.astype(np.uint8)
+```
+
+### 🚨 Common Pitfalls & Debug Checklist
+
+❌ **Common Mistakes**:
+
+1. **Output normalization error**: Dividing by 255 when output is already in [0-255] range
+2. **Input not normalized**: Forgetting to divide input by 255
+3. **Wrong channel order**: Not converting between HWC and CHW
+4. **Mask not binary**: Forgetting to threshold mask with `(mask > 0) * 1`
+5. **Missing padding**: Not padding images to required dimensions
+
+✅ **Debug Checklist**:
+
+- [ ] Input image values are in range [0, 1]
+- [ ] Input mask values are binary (0 or 1) and in range [0, 1]
+- [ ] Both inputs are in CHW format with batch dimension
+- [ ] Images are padded to be divisible by 8 (or model requirements)
+- [ ] Output is treated as already being in [0, 255] range
+- [ ] Output is converted from CHW to HWC before display
+- [ ] No additional scaling applied to output
+
+### 📝 Complete Example
+
+```python
+import cv2
+import numpy as np
+import onnxruntime
+from PIL import Image
+
+def preprocess_image(image):
+    """Convert PIL Image or numpy array to ONNX model input format."""
+    if isinstance(image, Image.Image):
+        img = np.array(image)
+    else:
+        img = image.copy()
+
+    # Convert to CHW format
+    if img.ndim == 3:
+        img = np.transpose(img, (2, 0, 1))  # HWC -> CHW
+    elif img.ndim == 2:
+        img = img[np.newaxis, ...]  # Add channel dimension
+
+    # Normalize to [0, 1]
+    img = img.astype(np.float32) / 255.0
+    return img
+
+def pad_to_modulo(img, mod=8):
+    """Pad image to be divisible by mod."""
+    channels, height, width = img.shape
+    out_height = (height + mod - 1) // mod * mod
+    out_width = (width + mod - 1) // mod * mod
+    return np.pad(img,
+                  ((0, 0), (0, out_height - height), (0, out_width - width)),
+                  mode='symmetric')
+
+def postprocess_output(output):
+    """Convert ONNX model output to displayable image."""
+    # Remove batch dimension and convert CHW to HWC
+    output = output[0].transpose(1, 2, 0)
+
+    # Output is already in [0, 255] range, just convert to uint8
+    output = np.clip(output, 0, 255).astype(np.uint8)
+    return output
+
+# Load ONNX model
+session = onnxruntime.InferenceSession('lama.onnx')
+
+# Load and preprocess inputs
+image = Image.open('image.jpg')
+mask = Image.open('mask.png').convert('L')
+
+# Preprocess
+img_array = preprocess_image(image)
+mask_array = preprocess_image(mask)
+
+# Pad to required dimensions
+img_array = pad_to_modulo(img_array)
+mask_array = pad_to_modulo(mask_array)
+
+# Binarize mask and add batch dimension
+mask_array = (mask_array > 0) * 1.0
+img_array = img_array[np.newaxis, ...]
+mask_array = mask_array[np.newaxis, ...]
+
+# Run inference
+output = session.run(None, {
+    'image': img_array.astype(np.float32),
+    'mask': mask_array.astype(np.float32)
+})[0]
+
+# Postprocess
+result = postprocess_output(output)
+
+# Save or display
+Image.fromarray(result).save('output.jpg')
+```
+
+### 🔗 References
+
+- Original discussion about ONNX differences: [advimman/lama#315](https://github.com/advimman/lama/issues/315)
+- Corrected ONNX inference notebook: [Google Colab](https://colab.research.google.com/drive/14cI-pSJdzVjyIdYpfVO-oQdX_jE9PEgG?usp=sharing)
+- IOPaint reference implementation: [lama.py](https://github.com/Sanster/IOPaint/blob/main/iopaint/model/lama.py) 
 
 
 
