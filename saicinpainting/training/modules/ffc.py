@@ -108,7 +108,10 @@ def irfft(REAL, IMAG, n=None, axis=-1, norm=None):
     IMAG_extended = torch.cat([IMAG, IMAG_flipped_conj], dim=axis)
 
     REAL = ifft1d(REAL_extended, IMAG_extended, axis=axis)[0]
-    REAL = REAL.permute(0, 1, 3, 2)
+    # Dynamic permutation: swap the last two dimensions
+    # Original: REAL.permute(0, 1, 3, 2) which only works for 4D tensors
+    # New: transpose last two dims, works for any number of dims
+    REAL = REAL.transpose(-1, -2)
     return REAL
 
 
@@ -134,10 +137,17 @@ def ifft1d(REAL, IMAG, n=None, axis=-1):
     final_real = real_part / torch.sqrt(n)
     final_imag = imag_part / torch.sqrt(n)
 
-    # calculate permutation
-    perm = list(range(len(REAL.shape)))
-    perm[2], perm[0] = perm[0], perm[2]
-    perm[0], perm[1] = perm[1], perm[0]
+    # Dynamic permutation that works with any tensor shape
+    # The tensordot operation moves the axis to position 0, so we need to move it back
+    # Original hardcoded logic: perm[2], perm[0] = perm[0], perm[2]; perm[0], perm[1] = perm[1], perm[0]
+    # This essentially does: [0,1,2,3] -> [2,1,0,3] -> [1,2,0,3]
+    # For 4D input [batch, channel, height, width], tensordot moves the specified axis to front
+    # We need to restore the original dimension order
+    ndim = len(REAL.shape)
+    # Create dynamic permutation: move dimension 0 to position 2, shift others accordingly
+    # For 4D: [0,1,2,3] -> [1,2,0,3] (move result dim from 0 to position 2)
+    perm = list(range(ndim))
+    perm = [1, 2, 0] + perm[3:] if ndim > 3 else perm  # Handle 4D+ tensors
 
     final_real = final_real.permute(perm)
     final_imag = final_imag.permute(perm)
