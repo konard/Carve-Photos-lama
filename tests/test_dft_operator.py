@@ -55,6 +55,10 @@ def create_dft_test_model():
     model_def = helper.make_model(graph_def, producer_name='dft_test')
     model_def.opset_import[0].version = 17
 
+    # Set IR version to 8 for compatibility with older ONNX Runtime versions
+    # (onnxruntime-directml may only support up to IR version 11)
+    model_def.ir_version = 8
+
     return model_def
 
 
@@ -100,6 +104,9 @@ def create_dft_2d_test_model():
 
     model_def = helper.make_model(graph_def, producer_name='dft_2d_test')
     model_def.opset_import[0].version = 17
+
+    # Set IR version to 8 for compatibility with older ONNX Runtime versions
+    model_def.ir_version = 8
 
     return model_def
 
