@@ -1,0 +1,194 @@
+================================================================================
+FFT Shape Analysis for TensorRT Conversion Error
+================================================================================
+
+Input Shape -> RFFT2 Output Shape
+--------------------------------------------------------------------------------
+  Input: ( 16,  16) -> Output: ( 16,   9)
+    Width: 16 -> 9 (formula: width//2 + 1)
+
+  Input: (512, 256) -> Output: (512, 129)
+    Width: 256 -> 129 (formula: width//2 + 1)
+
+  Input: (512, 512) -> Output: (512, 257)
+    Width: 512 -> 257 (formula: width//2 + 1)
+
+  Input: ( 32,  32) -> Output: ( 32,  17)
+    Width: 32 -> 17 (formula: width//2 + 1)
+
+  Input: ( 64,  64) -> Output: ( 64,  33)
+    Width: 64 -> 33 (formula: width//2 + 1)
+
+  Input: (256, 256) -> Output: (256, 129)
+    Width: 256 -> 129 (formula: width//2 + 1)
+
+  Input: (128,  64) -> Output: (128,  33)
+    Width: 64 -> 33 (formula: width//2 + 1)
+
+
+================================================================================
+ANALYSIS OF THE ERROR: '31 != 16'
+================================================================================
+
+The FFC layer uses downsampling (stride=2). Let's trace the shapes:
+
+Starting with optShapes: (512, 256)
+
+After 1 downsample(s):
+  Before FFT: (256, 128)
+  After RFFT: (256,  65)
+
+After 2 downsample(s):
+  Before FFT: (128,  64)
+  After RFFT: (128,  33)
+
+After 3 downsample(s):
+  Before FFT: ( 64,  32)
+  After RFFT: ( 64,  17)
+
+After 4 downsample(s):
+  Before FFT: ( 32,  16)
+  After RFFT: ( 32,   9)
+  ⚠ Potential issue: dimension mismatch
+
+After 5 downsample(s):
+  Before FFT: ( 16,   8)
+  After RFFT: ( 16,   5)
+  ⚠ Potential issue: dimension mismatch
+
+
+================================================================================
+DEEPER ANALYSIS
+================================================================================
+
+The error path: /generator/model/model.5/conv1/ffc/convg2g/Add
+
+This is an elementwise Add in the SpectralTransform (convg2g).
+Looking at SpectralTransform.forward() in ffc.py:
+  - It applies conv1 (reduces channels)
+  - Then applies FourierUnit (fu)
+  - Optionally applies local FourierUnit (lfu) with split
+  - Finally: output = conv2(x + output + xs)  <- THIS ADD
+
+The LFU (Local Fourier Unit) splits the tensor:
+  split_no = 2
+  split_s = h // split_no
+
+For (32, 16) after downsampling:
+  split_s = 32 // 2 = 16
+  This splits height into chunks of 16
+
+After splitting and RFFT on (16, 8):
+  RFFT output: (16, 5)
+
+But width 8 -> RFFT width = 5, not 8!
+This misalignment causes the Add operation to fail.
+
+
+================================================================================
+SHAPE COMPATIBILITY FOR TENSORRT DYNAMIC SHAPES
+================================================================================
+
+Testing the provided TensorRT shape profiles:
+
+With 3 downsampling stages (stride=2 each):
+
+minShapes: (16, 16)
+  After 3 downsamples: (2, 2)
+  After RFFT: (2, 2)
+  LFU split (h/2, w/2): (1, 1)
+  LFU after RFFT: (1, 1)
+
+optShapes: (512, 256)
+  After 3 downsamples: (64, 32)
+  After RFFT: (64, 17)
+  LFU split (h/2, w/2): (32, 16)
+  LFU after RFFT: (32, 9)
+    ⚠ MISMATCH: 16 != 9
+
+maxShapes: (512, 512)
+  After 3 downsamples: (64, 64)
+  After RFFT: (64, 33)
+  LFU split (h/2, w/2): (32, 32)
+  LFU after RFFT: (32, 17)
+    ⚠ MISMATCH: 32 != 17
+
+
+================================================================================
+FINDING COMPATIBLE SHAPES
+================================================================================
+
+For shapes to work with TensorRT dynamic shapes, ALL dimensions
+must remain compatible after FFT operations.
+
+Testing multiples of 16 for both height and width:
+
+  ✓ ( 16,  16) -> downsampled (2, 2) -> RFFT width 2
+  ✓ ( 16,  32) -> downsampled (2, 4) -> RFFT width 3
+  ✓ ( 16,  64) -> downsampled (2, 8) -> RFFT width 5
+  ✓ ( 16, 128) -> downsampled (2, 16) -> RFFT width 9
+  ✓ ( 16, 256) -> downsampled (2, 32) -> RFFT width 17
+  ✓ ( 16, 512) -> downsampled (2, 64) -> RFFT width 33
+  ✓ ( 32,  16) -> downsampled (4, 2) -> RFFT width 2
+  ✓ ( 32,  32) -> downsampled (4, 4) -> RFFT width 3
+  ✓ ( 32,  64) -> downsampled (4, 8) -> RFFT width 5
+  ✓ ( 32, 128) -> downsampled (4, 16) -> RFFT width 9
+  ✓ ( 32, 256) -> downsampled (4, 32) -> RFFT width 17
+  ✓ ( 32, 512) -> downsampled (4, 64) -> RFFT width 33
+  ✓ ( 64,  16) -> downsampled (8, 2) -> RFFT width 2
+  ✓ ( 64,  32) -> downsampled (8, 4) -> RFFT width 3
+  ✓ ( 64,  64) -> downsampled (8, 8) -> RFFT width 5
+  ✓ ( 64, 128) -> downsampled (8, 16) -> RFFT width 9
+  ✓ ( 64, 256) -> downsampled (8, 32) -> RFFT width 17
+  ✓ ( 64, 512) -> downsampled (8, 64) -> RFFT width 33
+  ✓ (128,  16) -> downsampled (16, 2) -> RFFT width 2
+  ✓ (128,  32) -> downsampled (16, 4) -> RFFT width 3
+  ✓ (128,  64) -> downsampled (16, 8) -> RFFT width 5
+  ✓ (128, 128) -> downsampled (16, 16) -> RFFT width 9
+  ✓ (128, 256) -> downsampled (16, 32) -> RFFT width 17
+  ✓ (128, 512) -> downsampled (16, 64) -> RFFT width 33
+  ✓ (256,  16) -> downsampled (32, 2) -> RFFT width 2
+  ✓ (256,  32) -> downsampled (32, 4) -> RFFT width 3
+  ✓ (256,  64) -> downsampled (32, 8) -> RFFT width 5
+  ✓ (256, 128) -> downsampled (32, 16) -> RFFT width 9
+  ✓ (256, 256) -> downsampled (32, 32) -> RFFT width 17
+  ✓ (256, 512) -> downsampled (32, 64) -> RFFT width 33
+  ✓ (512,  16) -> downsampled (64, 2) -> RFFT width 2
+  ✓ (512,  32) -> downsampled (64, 4) -> RFFT width 3
+  ✓ (512,  64) -> downsampled (64, 8) -> RFFT width 5
+  ✓ (512, 128) -> downsampled (64, 16) -> RFFT width 9
+  ✓ (512, 256) -> downsampled (64, 32) -> RFFT width 17
+  ✓ (512, 512) -> downsampled (64, 64) -> RFFT width 33
+
+Compatible shapes found: 36
+
+Recommended TensorRT shape profiles:
+  --minShapes=image:1x3x16x16,mask:1x1x16x16
+  --optShapes=image:1x3x512x512,mask:1x1x512x512
+  --maxShapes=image:1x3x1024x1024,mask:1x1x1024x1024
+
+Key: Use SQUARE inputs that are multiples of 16!
+
+================================================================================
+CONCLUSION
+================================================================================
+
+ROOT CAUSE:
+  1. The model uses RFFT which transforms width W to W//2+1
+  2. Non-square inputs (512x256) create dimension mismatches
+  3. After downsampling: (512,256) -> (64,32) -> (32,16) -> (16,8)
+  4. The LFU splits further: (16,8) -> (8,4) before RFFT
+  5. RFFT on width 4 gives 3, not 4 - causing Add to fail
+
+SOLUTION:
+  Use square input shapes OR multiples where width after all
+  transformations remains even. Safest: powers of 2 for both dims.
+
+RECOMMENDED TRTEXEC COMMAND:
+  trtexec --onnx=$onnx_path \
+    --minShapes=image:1x3x16x16,mask:1x1x16x16 \
+    --optShapes=image:1x3x512x512,mask:1x1x512x512 \
+    --maxShapes=image:1x3x1024x1024,mask:1x1x1024x1024 \
+    --saveEngine=$tensorrt_path \
+    --verbose
+
