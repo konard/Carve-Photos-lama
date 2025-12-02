@@ -23,10 +23,21 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
-def create_test_input(batch_size=1, channels=4, height=256, width=256):
-    """Create a test input tensor matching LaMa model expectations."""
-    # LaMa expects NCHW format with 4 channels (RGB + mask)
-    return np.random.randn(batch_size, channels, height, width).astype(np.float32)
+def create_test_inputs(batch_size=1, height=512, width=512):
+    """Create test input tensors matching LaMa model expectations.
+
+    LaMa ONNX model expects:
+    - image: (batch, 3, height, width) - RGB image
+    - mask: (batch, 1, height, width) - binary mask (1 = area to inpaint)
+    """
+    image = np.random.randn(batch_size, 3, height, width).astype(np.float32)
+    # Create a simple mask with some region to inpaint
+    mask = np.zeros((batch_size, 1, height, width), dtype=np.float32)
+    # Mark center region for inpainting
+    h_start, h_end = height // 4, 3 * height // 4
+    w_start, w_end = width // 4, 3 * width // 4
+    mask[:, :, h_start:h_end, w_start:w_end] = 1.0
+    return image, mask
 
 
 def test_directml_execution():
@@ -88,24 +99,30 @@ def test_directml_execution():
         return 2
 
     # Get input/output info
-    input_info = session.get_inputs()[0]
-    output_info = session.get_outputs()[0]
-    print(f"\nInput: {input_info.name}, shape: {input_info.shape}, type: {input_info.type}")
-    print(f"Output: {output_info.name}, shape: {output_info.shape}, type: {output_info.type}")
+    print("\nModel inputs:")
+    for inp in session.get_inputs():
+        print(f"  {inp.name}: shape={inp.shape}, type={inp.type}")
+    print("Model outputs:")
+    for out in session.get_outputs():
+        print(f"  {out.name}: shape={out.shape}, type={out.type}")
 
-    # Create test input
-    # The model expects dynamic batch size and spatial dimensions
-    # Using a small size for faster testing
-    test_input = create_test_input(batch_size=1, channels=4, height=256, width=256)
-    print(f"\nTest input shape: {test_input.shape}")
+    # Create test inputs
+    # Using 512x512 as it's the model's expected size
+    image, mask = create_test_inputs(batch_size=1, height=512, width=512)
+    print(f"\nTest image shape: {image.shape}")
+    print(f"Test mask shape: {mask.shape}")
 
     # Run inference
     print("\n--- Running inference with DirectML ---")
     print("This is expected to fail with error 80070057...")
 
     try:
-        input_name = session.get_inputs()[0].name
-        output = session.run(None, {input_name: test_input})
+        # Prepare feed dict with both inputs
+        feed_dict = {
+            'image': image,
+            'mask': mask
+        }
+        output = session.run(None, feed_dict)
 
         print("\n" + "=" * 60)
         print("UNEXPECTED: DirectML execution SUCCEEDED!")
@@ -121,7 +138,7 @@ def test_directml_execution():
     except Exception as e:
         error_str = str(e)
         print(f"\n{'=' * 60}")
-        print("DirectML execution FAILED (as expected)")
+        print("DirectML execution FAILED")
         print("=" * 60)
         print(f"\nError message:\n{error_str}")
 
@@ -143,6 +160,17 @@ def test_directml_execution():
             print("\nThe error appears related to the FFT implementation")
             print("but with a different error message than originally reported.")
             return 1
+
+        elif "no devices" in error_str.lower() or "device" in error_str.lower():
+            print("\n" + "=" * 60)
+            print("INFO: No DirectML GPU device available")
+            print("=" * 60)
+            print("\nThis environment doesn't have a DirectML-compatible GPU.")
+            print("The test cannot reproduce the issue without hardware.")
+            print("\nTo reproduce the issue, run this test on a Windows machine")
+            print("with an AMD or Intel GPU (without CUDA).")
+            # Return 0 as this is not a test failure, just no hardware
+            return 0
 
         else:
             print("\n" + "=" * 60)

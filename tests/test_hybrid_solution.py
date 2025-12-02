@@ -22,9 +22,21 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
-def create_test_input(batch_size=1, channels=4, height=256, width=256):
-    """Create a test input tensor matching LaMa model expectations."""
-    return np.random.randn(batch_size, channels, height, width).astype(np.float32)
+def create_test_inputs(batch_size=1, height=512, width=512):
+    """Create test input tensors matching LaMa model expectations.
+
+    LaMa ONNX model expects:
+    - image: (batch, 3, height, width) - RGB image
+    - mask: (batch, 1, height, width) - binary mask (1 = area to inpaint)
+    """
+    image = np.random.randn(batch_size, 3, height, width).astype(np.float32)
+    # Create a simple mask with some region to inpaint
+    mask = np.zeros((batch_size, 1, height, width), dtype=np.float32)
+    # Mark center region for inpainting
+    h_start, h_end = height // 4, 3 * height // 4
+    w_start, w_end = width // 4, 3 * width // 4
+    mask[:, :, h_start:h_end, w_start:w_end] = 1.0
+    return image, mask
 
 
 def test_hybrid_execution():
@@ -88,26 +100,30 @@ def test_hybrid_execution():
         return 1
 
     # Get input/output info
-    input_info = session.get_inputs()[0]
-    output_info = session.get_outputs()[0]
-    print(f"\nInput: {input_info.name}, shape: {input_info.shape}, type: {input_info.type}")
-    print(f"Output: {output_info.name}, shape: {output_info.shape}, type: {output_info.type}")
+    print("\nModel inputs:")
+    for inp in session.get_inputs():
+        print(f"  {inp.name}: shape={inp.shape}, type={inp.type}")
+    print("Model outputs:")
+    for out in session.get_outputs():
+        print(f"  {out.name}: shape={out.shape}, type={out.type}")
 
     # Test inference
-    test_input = create_test_input(batch_size=1, channels=4, height=256, width=256)
-    print(f"\nTest input shape: {test_input.shape}")
+    image, mask = create_test_inputs(batch_size=1, height=512, width=512)
+    print(f"\nTest image shape: {image.shape}")
+    print(f"Test mask shape: {mask.shape}")
 
     print("\n--- Running inference with Hybrid execution ---")
 
     try:
-        input_name = session.get_inputs()[0].name
+        # Prepare feed dict
+        feed_dict = {'image': image, 'mask': mask}
 
         # Warmup run
-        _ = session.run(None, {input_name: test_input})
+        _ = session.run(None, feed_dict)
 
         # Timed run
         start_time = time.time()
-        output = session.run(None, {input_name: test_input})
+        output = session.run(None, feed_dict)
         elapsed_time = time.time() - start_time
 
         print(f"\nOutput shape: {output[0].shape}")
