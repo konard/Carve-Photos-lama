@@ -1,0 +1,199 @@
+name: Test DirectML Solutions
+
+on:
+  push:
+    branches: [issue-1-*, main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test-directml-windows:
+    name: Test DirectML on Windows
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          # Core dependencies for ONNX testing
+          pip install numpy onnxruntime-directml onnx onnx-graphsurgeon
+          pip install requests pillow
+          # Log installed packages
+          pip list | Out-File -FilePath pip-packages.txt
+
+      - name: Upload pip packages list
+        uses: actions/upload-artifact@v4
+        with:
+          name: pip-packages-directml
+          path: pip-packages.txt
+
+      - name: Download LaMa ONNX model
+        shell: pwsh
+        run: |
+          # Create model directory
+          New-Item -ItemType Directory -Force -Path "models/lama"
+
+          # Download the model from HuggingFace
+          $modelUrl = "https://huggingface.co/Carve/LaMa-ONNX/resolve/main/lama_fp32.onnx"
+          $modelPath = "models/lama/lama_fp32.onnx"
+
+          Write-Host "Downloading LaMa ONNX model..."
+          Invoke-WebRequest -Uri $modelUrl -OutFile $modelPath -UseBasicParsing
+
+          # Verify download
+          if (Test-Path $modelPath) {
+            $fileSize = (Get-Item $modelPath).Length / 1MB
+            Write-Host "Model downloaded successfully. Size: $([math]::Round($fileSize, 2)) MB"
+          } else {
+            Write-Error "Failed to download model"
+            exit 1
+          }
+
+      - name: Run DirectML reproduction test
+        id: directml_test
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          Write-Host "=== Testing DirectML Execution Provider ==="
+          python tests/test_directml_reproduction.py 2>&1 | Tee-Object -FilePath test-directml-output.txt
+          $exitCode = $LASTEXITCODE
+          Write-Host "DirectML test exit code: $exitCode"
+          echo "directml_exit_code=$exitCode" >> $env:GITHUB_OUTPUT
+
+      - name: Run CPU solution test
+        id: cpu_test
+        shell: pwsh
+        run: |
+          Write-Host "=== Testing CPU Execution Provider (Solution A1) ==="
+          python tests/test_cpu_solution.py 2>&1 | Tee-Object -FilePath test-cpu-output.txt
+          $exitCode = $LASTEXITCODE
+          Write-Host "CPU test exit code: $exitCode"
+          echo "cpu_exit_code=$exitCode" >> $env:GITHUB_OUTPUT
+
+      - name: Run Hybrid solution test
+        id: hybrid_test
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          Write-Host "=== Testing Hybrid Execution (Solution A2) ==="
+          python tests/test_hybrid_solution.py 2>&1 | Tee-Object -FilePath test-hybrid-output.txt
+          $exitCode = $LASTEXITCODE
+          Write-Host "Hybrid test exit code: $exitCode"
+          echo "hybrid_exit_code=$exitCode" >> $env:GITHUB_OUTPUT
+
+      - name: Test DFT operator support
+        id: dft_test
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          Write-Host "=== Testing Native ONNX DFT Operator Support ==="
+          python tests/test_dft_operator.py 2>&1 | Tee-Object -FilePath test-dft-output.txt
+          $exitCode = $LASTEXITCODE
+          Write-Host "DFT operator test exit code: $exitCode"
+          echo "dft_exit_code=$exitCode" >> $env:GITHUB_OUTPUT
+
+      - name: Upload test outputs
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-outputs-windows
+          path: |
+            test-*.txt
+
+      - name: Generate test summary
+        shell: pwsh
+        if: always()
+        run: |
+          Write-Host "============================================"
+          Write-Host "       TEST RESULTS SUMMARY"
+          Write-Host "============================================"
+          Write-Host ""
+
+          $directml = "${{ steps.directml_test.outputs.directml_exit_code }}"
+          $cpu = "${{ steps.cpu_test.outputs.cpu_exit_code }}"
+          $hybrid = "${{ steps.hybrid_test.outputs.hybrid_exit_code }}"
+          $dft = "${{ steps.dft_test.outputs.dft_exit_code }}"
+
+          Write-Host "| Test | Exit Code | Status |"
+          Write-Host "|------|-----------|--------|"
+          Write-Host "| DirectML (Reproduces Issue) | $directml | $(if($directml -eq '0') {'PASS (No Error)'} elseif($directml -eq '1') {'FAIL (Error Reproduced)'} else {'UNKNOWN'}) |"
+          Write-Host "| CPU Solution (A1) | $cpu | $(if($cpu -eq '0') {'PASS'} else {'FAIL'}) |"
+          Write-Host "| Hybrid Solution (A2) | $hybrid | $(if($hybrid -eq '0') {'PASS'} else {'FAIL'}) |"
+          Write-Host "| DFT Operator Support | $dft | $(if($dft -eq '0') {'SUPPORTED'} else {'NOT SUPPORTED'}) |"
+          Write-Host ""
+          Write-Host "============================================"
+
+          # Write summary to file
+          $summary = @"
+          # DirectML Solution Test Results
+
+          | Solution | Status | Notes |
+          |----------|--------|-------|
+          | DirectML (Issue Reproduction) | $(if($directml -eq '0') {'No Error'} elseif($directml -eq '1') {'Error Reproduced'} else {'Unknown'}) | Expected to fail with error 80070057 |
+          | CPU Solution (A1) | $(if($cpu -eq '0') {'Working'} else {'Failed'}) | Recommended workaround |
+          | Hybrid Solution (A2) | $(if($hybrid -eq '0') {'Working'} else {'Failed'}) | DirectML + CPU fallback |
+          | DFT Operator | $(if($dft -eq '0') {'Supported'} else {'Not Supported'}) | Native ONNX DFT on DirectML |
+
+          ## Test Environment
+          - OS: Windows (GitHub Actions windows-latest)
+          - Python: 3.10
+          - ONNX Runtime: DirectML variant
+          "@
+
+          $summary | Out-File -FilePath test-summary.md
+
+      - name: Upload test summary
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-summary
+          path: test-summary.md
+
+  test-cpu-linux:
+    name: Test CPU on Linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install numpy onnxruntime onnx onnx-graphsurgeon
+          pip install requests pillow
+
+      - name: Download LaMa ONNX model
+        run: |
+          mkdir -p models/lama
+          wget -q "https://huggingface.co/Carve/LaMa-ONNX/resolve/main/lama_fp32.onnx" -O models/lama/lama_fp32.onnx
+          ls -la models/lama/
+
+      - name: Run CPU solution test (Linux)
+        run: |
+          echo "=== Testing CPU Execution Provider on Linux ==="
+          python tests/test_cpu_solution.py
+
+      - name: Test DFT operator support (Linux)
+        run: |
+          echo "=== Testing Native ONNX DFT Operator Support on Linux ==="
+          python tests/test_dft_operator.py
